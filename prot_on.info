@@ -1,0 +1,6 @@
+name = Prot-On
+description = Prot-On Drupal module
+core = 7.x
+
+configure = admin/config/content/prot_on
+stylesheets[all][] = css/prot_on.css

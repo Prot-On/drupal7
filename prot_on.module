@@ -1,0 +1,972 @@
+<?php
+/**
+ * @file
+ * Drupal - Prot-On plugin
+ *
+ * @author Santiago Cuenca Lizcano
+ * @copyright 2015 Protección Online, S.L. info@prot-on.com
+ *
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+ 
+ 
+spl_autoload_register(function(){
+	$path = drupal_realpath(drupal_get_path('module', 'prot_on'))."/lib/";
+	$files = array_diff(scandir($path), array('..', '.'));
+	prot_on_scan_includes($path, $files);
+});
+
+function prot_on_scan_includes($path, $files){
+	
+	foreach($files as $file){
+		$absolutePath = $path.'/'.$file;
+		if(pathinfo($file, PATHINFO_EXTENSION)=='php'){
+			include_once($absolutePath);
+		}
+	}
+	
+}
+
+use Drupal\prot_on\Util as Util;
+use Drupal\prot_on\OAuth as OAuth;
+
+function prot_on_help($path, $arg) {
+  switch ($path) {
+    case "admin/help#prot_on":
+      $result = '<p>' . t("Configuration page") . '</p>
+      	<form name=""><input type="text" /></form>';
+      return $result;
+      break;
+  }
+}
+
+/**
+ * Implements hook_menu().
+ */
+function prot_on_menu() {
+
+	$items = array();
+	$items['admin/config/content/prot_on'] = array(
+		'title' => t('Configuration of Prot-On Drupal module'),
+		'description' => t('Configure the Prot-On Drupal module'),
+		'page callback' => 'drupal_get_form',
+		'page arguments' => array('prot_on_admin'),
+		'access arguments' => array('administer prot_on settings'),
+		'type' => MENU_NORMAL_ITEM,
+	);
+	$items['prot_on/oauth'] = array(
+			'page callback' => 'prot_on_login_home',
+			'page_arguments' => NULL,
+			'type' => MENU_CALLBACK,
+			'access callback' => TRUE,
+	);
+	$items['prot_on/oauth/%'] = array(
+		'page callback' => 'prot_on_login',
+		'page arguments' => array(2),
+		'type' => MENU_CALLBACK,
+		'access callback' => TRUE,
+	);
+	$items['prot_on/sso'] = array(
+			'page callback' => 'prot_on_sso',
+			'page arguments' => NULL,
+			'type' => MENU_CALLBACK,
+			'access callback' => TRUE,
+	);
+	
+	return $items;
+  
+}
+
+function prot_on_login_home(){
+	
+	if (session_status() == PHP_SESSION_NONE) {
+		session_start();
+	}
+	
+	OAuth\OAuth::OAuthWithNid(NULL);
+	
+}
+
+function prot_on_login($nid){
+	
+	if (session_status() == PHP_SESSION_NONE) {
+		session_start();
+	}
+	
+	OAuth\OAuth::OAuthWithNid($nid);
+		
+}
+
+function prot_on_sso(){
+	
+	if (session_status() == PHP_SESSION_NONE) {
+		session_start();
+	}
+	
+	if(!isOAuthLogged()){
+		OAuth\OAuth::OAuthSSO();
+	} else {
+		
+		$protOnUser = $_SESSION['protOnUser'];
+		$protOnUsername = $protOnUser['username'].'@prot-on';
+		$protOnEmail = $_SESSION['protOnUser']['mainEmail'];
+		
+		$drupalUser = user_load_by_mail($protOnEmail);
+		if(empty($drupalUser)) {
+			user_external_login_register($protOnUsername, 'prot_on');
+			$drupalUser = user_load_by_name($protOnUsername);
+			$drupalUser->mail = $protOnEmail;
+			user_save($drupalUser);
+		}
+		$authmap = user_get_authmaps($protOnUsername);
+		
+		// Como ya existe, tenemos que crear el usuario externo
+		// y asociarlo con el UID de Drupal
+		if(empty($authmap['prot_on'])){
+			user_set_authmaps($drupalUser, array('authname_prot_on' => $protOnUsername));
+		}
+		
+		prot_on_persist_tokens($drupalUser->uid);
+		
+		// En todos los casos logamos, o registramos si no existía
+		user_external_login_register($protOnUsername, 'prot_on');
+		
+		header('Location: '.base_path());
+	}	
+	
+}
+
+/**
+* Settings form
+*
+* @return array The form structure.
+*/
+function prot_on_admin() {
+	$form = array();
+	
+	// COMPANY NAME
+	$form['prot_on_company_name'] = array(
+			'#type' => 'textfield',
+		'#title' => t('Company Name'),
+		'#default_value' => variable_get('prot_on_company_name', "Protected"),
+		'#size' => 60,
+		'#maxlength' => 250,
+		'#description' => t("Company Name"),
+		'#required' => TRUE,
+	);
+	
+	// PROT-ON ACTIVE SINGLE SIGN ON
+	$form['prot_on_active_sso'] = array(
+			'#type' => 'checkbox',
+			'#title' => t('Prot-On Single Sign On Active'),
+			'#default_value' => variable_get('prot_on_active_sso', ""),
+			'#required' => FALSE,
+	);
+	
+	// PROT-ON SERVER URL
+	$form['prot_on_url'] = array(
+		'#type' => 'textfield',
+		'#title' => t('Prot-On Server URL'),
+		'#default_value' => variable_get('prot_on_url', "https://proton.prot-on.com"),
+		'#size' => 60,
+		'#maxlength' => 250,
+		'#description' => t("Prot-On Server URL"),
+		'#required' => TRUE,
+	);
+	
+	// DND URL
+	$form['prot_on_dnd_url'] = array(
+		'#type' => 'textfield',
+		'#title' => t('Drag\'n Drop URL'),
+		'#default_value' => variable_get('prot_on_dnd_url', "https://dnd.prot-on.com"),
+		'#size' => 60,
+		'#maxlength' => 250,
+		'#description' => t("Drag'n Drop URL"),
+		'#required' => TRUE,
+	);
+	
+	// Client ID
+	$form['prot_on_dnd_client_id'] = array(
+		'#type' => 'textfield',
+		'#title' => t('# Client ID'),
+		'#default_value' => variable_get('prot_on_dnd_client_id', ""),
+		'#size' => 60,
+		'#maxlength' => 250,
+		'#description' => t("# Client ID"),
+		'#required' => TRUE,
+	);
+	
+	// Secret
+	$form['prot_on_dnd_secret'] = array(
+		'#type' => 'textfield',
+		'#title' => t('Secret'),
+		'#default_value' => variable_get('prot_on_dnd_secret', ""),
+		'#size' => 60,
+		'#maxlength' => 250,
+		'#description' => t("Secret"),
+		'#required' => TRUE,
+	);
+	
+	// Prot-On Shortener URL
+	$form['prot_on_shortener_url'] = array(
+			'#type' => 'textfield',
+			'#title' => t('Prot-On Shortener URL'),
+			'#default_value' => variable_get('prot_on_shortener_url', "http://prtn.ws"),
+			'#size' => 60,
+			'#maxlength' => 250,
+			'#description' => t("Prot-On Shortener URL"),
+			'#required' => TRUE,
+	);
+	
+	return system_settings_form($form);
+}
+
+/**
+* Implements hook_permission().
+*/
+function prot_on_permission() {
+	return array(
+		'administer prot_on settings' => array(
+			'title' => t('Administer Prot-On configurations'),
+			'restrict access' => true,
+		)
+	);
+}
+
+/**
+* Scan the text looking for links, and checks if they point to
+* Prot-On files, in order to add Drag'n Drop as the default
+* viewer.
+*/
+function prot_on_node_view($node, $view_mode, $langcode) {
+	
+	drupal_add_library('system', 'ui.dialog');
+	drupal_add_js(drupal_get_path('module', 'prot_on') . '/js/prot_on.js', array('type'=>'file', 'scope'=>'footer', 'requires_jquery' => TRUE, 'weight'=>'500'));
+	
+	if(!empty($_GET['code'])){
+		OAuth\OAuth::OAuthWithNid(prot_on_getNID());
+	}
+	if(!isOAuthLogged()){
+		$text_types = array('body', 'text', 'text_long', 'text_with_summary', 'summary', 'list_text', 'taxonomy_term_reference');
+		$fields = field_info_field_map();
+		foreach($fields as $fieldName=>$fieldAttrs){
+
+                	$dom = new DOMDocument();
+
+			if(in_array($fieldAttrs['type'], $text_types)){
+			
+				$textFields = isset($node->content[$fieldName]) ? $node->content[$fieldName] : NULL;
+
+	                        for($i = 0; $i < count($textFields); $i++){
+
+        	                        $text = isset($textFields[$i]['#markup']) ? $textFields[$i]['#markup'] : NULL;
+                	                if(isset($text)){
+		
+						/* Begin Finding Prot-On Elements */
+						$text = prot_on_find_text($text);
+						/* End Finding Prot-On Elements */
+		
+						/* DOM load */
+						$dom = new DOMDocument();
+						$dom->loadXML('<node>'.$text.'</node>');
+		
+						/* Begin Prot-On advise */
+						$protOnElements = $dom->createElement('DIV');
+						$style = $dom->createAttribute('class');
+						$styleValue = $dom->createTextNode('protOnElementsAdvise protOnElementBorder');
+						$style->appendChild($styleValue);
+						$protOnElements->appendChild($style);
+						$textNode = $dom->createTextNode('There are Prot-On elements in this document. In order to watch them, please ');
+				
+						$anchor = $dom->createElement('A');
+						$href = $dom->createAttribute('href');
+						$href->nodeValue = base_path().'prot_on/oauth/'.prot_on_getNID();
+						$anchor->appendChild($href);
+						$anchor->nodeValue = 'log-in with Prot-On';
+		
+						$protOnElements->appendChild($textNode);
+						$protOnElements->appendChild($anchor);
+						/* End Prot-On advise */
+		
+						$dom->insertBefore($protOnElements, $dom->firstChild);
+		
+						$text = $dom->saveXML($dom);
+						$textField['#markup'] = $text;
+						
+						$node->content[$fieldName] = $textField;
+
+					}
+				}
+			}
+
+		}
+
+	} else {
+		return prot_on_parse_node($node, $view_mode, $langcode);
+	}
+    
+}
+
+/**
+ * Parses the Prot-On elements found in a node
+ * @param $node
+ * @param $view_mode
+ * @param $langcode
+ */
+function prot_on_parse_node($node, $view_mode, $langcode){
+	
+	$text_types = array('body', 'text', 'text_long', 'text_with_summary', 'summary', 'list_text', 'taxonomy_term_reference');
+	$image_types = array('image');
+	$file_types = array('file');
+	$fields = field_info_field_map();
+	foreach($fields as $fieldName=>$fieldAttrs){
+		
+		$dom = new DOMDocument();
+	
+		if(in_array($fieldAttrs['type'], $text_types)){
+				
+			$textFields = isset($node->content[$fieldName]) ? $node->content[$fieldName] : NULL;
+
+			for($i = 0; $i < count($textFields); $i++){
+			
+				$text = isset($textFields[$i]['#markup']) ? $textFields[$i]['#markup'] : NULL;
+				if(isset($text)){
+	
+					// Find matches for protected text and tag them
+					$text = prot_on_find_text($text);
+	
+					/* DOM load */
+					$dom->loadXML('<node>'.$text.'</node>');
+	
+					/* text */
+					$text = prot_on_decrypt_text($dom);
+	
+					/* hrefs */
+					$text = prot_on_modify_tags($text, 'a', 'href');
+
+					/* image tags */
+					$text = prot_on_modify_tags($text, 'img', 'src');
+
+					$text = $dom->saveXML($dom);
+					
+					$textFields[$i]['#markup'] = $text;
+					$node->content[$fieldName] = $textFields[$i];
+
+				}
+
+			}
+
+		} elseif(in_array($fieldAttrs['type'], $image_types)) {
+			/* image fields */
+			$images = isset($node->content[$fieldName]) ? $node->content[$fieldName] : NULL;
+			if(isset($images)){
+				prot_on_modify_images($node, $images);
+			}
+		} elseif(in_array($fieldAttrs['type'], $file_types)) {
+			// Other fields (attachments)
+			prot_on_parse_attachments($node);
+		}
+
+		/* DOM save */
+		$dom->saveXML($dom);
+
+		/****************************/
+
+	}
+		
+}
+	
+
+/**
+ * Find matches for protected text and tag them
+ * @param string $strBody
+ * @return string $strBody
+ */
+function prot_on_find_text($strBody){
+	
+	$strBody = prot_on_complete_previews($strBody);
+	
+	$pattern = "/\[Prot-On(.+)~Prot-On\]/";
+	
+	preg_match_all($pattern, $strBody, $matches);
+	
+	$resultList = array();
+	if(is_array($matches)) :
+	
+	$first = $matches[0];
+	if(is_array($first)){
+		$resultList = $first;
+	} else {
+		array_push($resultList, $first[0]);
+	}
+	
+	endif;
+	
+	// Inserting <match> tag for matches
+	$h5 = '<h5 class="protOnAdvise">Text protected with Prot-On.';
+	if(!isOAuthLogged()){
+		$h5 .= 'If you want to see it, you must <a href="'.base_path().'prot_on/oauth" title="Prot-On Log-in">log-in</a>';
+	} else {
+		$h5 .= ' It seems that you do not have permissions to watch it.';
+	}
+	$h5 .= '</h5>';
+	foreach($resultList as $match){
+		$strBody = str_replace($match, '<div class="protOnText protOnElementBorder">'.$h5.$match.'</div>', $strBody);
+	}
+	
+	return $strBody;
+}
+
+function prot_on_complete_previews($strBody){
+	
+	$pattern = "/\[Prot-On(.+)[^~Prot\-On\]]<\//";
+	
+	preg_match_all($pattern, $strBody, $matches);
+	
+	$resultList = array();
+	if(is_array($matches)) :
+	
+	$first = $matches[0];
+	if(is_array($first)){
+		$resultList = $first;
+	} else {
+		array_push($resultList, $first[0]);
+	}
+	
+	foreach($resultList as $match){
+		$replace = substr($match, 0, -2)."~Prot-On]</";
+		$strBody = str_replace($match, $replace, $strBody);
+	}
+	
+	endif;
+	
+	return $strBody;
+	
+}
+
+/**
+ * Decrypt protected text in document
+ * @param DOMDocument $dom
+ * @return DOMDocument $dom
+ */
+function prot_on_decrypt_text($dom){
+	
+	// Uses xpath to find all div with the class "protOnText"
+	$xpath = new DOMXpath($dom);
+	$matchList = $xpath->query("//*[contains(@class, 'protOnText')]");
+	foreach($matchList as $matchItem){
+		
+		$matchParent = $matchItem->parentNode;
+		
+		// Creates a temp text file containing the protected text
+		$tmpPath = drupal_realpath(drupal_get_path('module', 'prot_on')."/tmp");
+		$tmpFilePath = tempnam($tmpPath, 'txt');
+		$info = pathinfo($tmpFilePath);
+		$filePath = $tmpPath.'/'.$info['filename'].'.proton.txt';
+		rename($tmpFilePath, $filePath);
+		$file = fopen($filePath, "w+");
+		fwrite($file, $matchItem->nodeValue);
+		fclose($file);
+		
+		// Calls to decrypt service
+		$pest = Util::getPest(false);
+		
+		$httpHeaders = array('Content-Type' => 'multipart/form-data; charset=utf-8');
+		$postData = array('file' => prot_on_curl_file($filePath));
+		$pest->setupAuth($_SESSION['protOnOAuth']['access_token'], '', 'bearer');
+		try {
+			$thing = $pest->post('/documents/decrypt', $postData, $httpHeaders);
+		} catch (\Pest_Exception $e) {
+			$thing = NULL;
+			$jsonError = json_decode($e->getMessage());
+			if($jsonError->error==400){
+				$message = "You do not have enough privileges to read some parts of protected text in this document.";
+				$existing = drupal_get_messages('warning', false);
+				if(is_array($existing)){
+					$warnings = array();
+					if(array_key_exists('warning', $existing)) $warnings = $existing['warning'];
+					if(!in_array($message, $warnings)){
+						drupal_set_message($message, 'warning');
+					}
+					continue;
+				}
+			}
+		}
+		
+		$info = $thing instanceof Object ? json_decode($thing, true) : $thing;
+		
+		// Captures received text and change the original protected text with it
+		if($info!=NULL) {
+			// Creates a new div with the decrypted text that replaces the old one
+			$div = $dom->createElement('DIV');		
+			
+			$style = $dom->createAttribute('class');
+			$style->nodeValue = 'protOnText protOnElementBorder';
+			$div->appendChild($style);
+			$divText = $dom->createTextNode($info);
+			$div->appendChild($divText);
+			
+			$h5 = $dom->createElement('H5');
+			$h5->nodeValue = '--Protected text deciphered with Prot-On--';
+			
+			$matchParent = $matchItem->parentNode;
+			$matchParent->insertBefore($div, $matchItem);
+			$matchParent->insertBefore($h5, $div);
+		}
+		
+		$matchParent->removeChild($matchItem);
+		
+		unlink($filePath);
+		
+	}
+	
+	return $dom;
+	
+}
+
+function prot_on_decrypt_image($src){
+		
+	// Finds the image extension
+	$pathinfo = pathinfo($src);
+	$ext = $pathinfo['extension'];
+	$name = $pathinfo['basename'];
+	
+	// Creates a temp image file containing the protected image
+	$tmpPath = drupal_realpath(drupal_get_path('module', 'prot_on')."/tmp");
+	$tmpFilePath = tempnam($tmpPath, $ext);
+	$info = pathinfo($tmpFilePath);
+	$filePath = $tmpPath.'/'.$info['filename'].'.proton.'.$ext;
+	rename($tmpFilePath, $filePath);
+	$file = fopen($filePath, "w+");
+	copy(drupal_realpath($src), $filePath);
+	fclose($file);
+	
+	//Gets file info and check if the user can read or the image needs to be marked
+	$markImage = false;
+	$watermark = '';
+	$docInfo = prot_on_get_doc_info($filePath);
+	if($docInfo!=NULL){
+		
+		// Decrypting image
+		$imagePublicPath = 'public://field/image/'.str_replace(".proton", "", $name);
+		$imagePath = drupal_realpath($imagePublicPath);
+		$image = fopen($imagePath, "w+");
+		
+		// Call to decrypt service
+		$pest = Util::getPest(false);
+		$httpHeaders = array('Content-Type' => 'multipart/form-data');
+		$postData = array('file' => prot_on_curl_file($filePath));
+		$pest->setupAuth($_SESSION['protOnOAuth']['access_token'], '', 'bearer');
+		try {
+			// Marks the image if the user does not have permissions to read
+			if(empty($docInfo->use_license)
+					|| !in_array('read', $docInfo->use_license->permissions)){
+				$imagePublicPath = $src;
+				$error = '{"error": "400", "error_description": "User does not have permissions to see the image.", "prot_on_filename": "'.$name.'"}';
+				throw new \Exception($error);
+			}
+			$thing = $pest->post('/documents/decrypt', $postData, $httpHeaders);
+		
+			$bImage = $thing instanceof Object ? json_decode($thing, true) : $thing;
+			
+			fwrite($image, $bImage);
+			fclose($image);
+			// Mark image if needed
+			if(!empty($docInfo->use_license->watermark)){
+				$markImage = true;
+				$watermark = $docInfo->use_license->watermark;
+			} elseif(!in_array('manage', $docInfo->use_license->permissions)){
+				$markImage = true;
+				$watermark = variable_get('prot_on_company_name', 'Protected');
+			}
+			if($markImage){
+				if(!empty($bImage)){
+					$bImage = prot_on_mark_image($imagePath, $watermark);
+					$image = fopen($imagePath, "w+");
+					fwrite($image, $bImage);
+					fclose($image);
+				}
+			}
+			image_path_flush($imagePublicPath);
+		} catch (\Pest_Exception $e) {
+			$thing = NULL;
+			$message = $e->getMessage()!=NULL ? $e->getMessage() : NULL;
+			if(!empty($message)){
+				$errorJson = json_decode($message);
+				drupal_set_message("Error ".$errorJson->error.": ".$errorJson->error_description, 'error');
+			}
+		} catch (\Exception $e){
+			$message = $e->getMessage()!=NULL ? $e->getMessage() : NULL;
+			if(!empty($message) && $message instanceof Object){
+				$errorJson = json_decode($message);
+				drupal_set_message("Error ".$errorJson->error.": ".$errorJson->error_description." ('".$errorJson->prot_on_filename."')", 'warning');
+			} else {
+				drupal_set_message("Error: ".$message, 'warning');
+			}
+		}
+	} else {
+		$imagePublicPath = $src;
+	}
+	
+	unlink($filePath);
+
+	return $imagePublicPath;
+	
+}
+
+function prot_on_get_doc_info($filePath){
+	
+	$docInfo = NULL;
+	
+	$curlFile = prot_on_curl_file($filePath);
+	
+	// Call to getInfo service
+	$pest = Util::getPest(false);
+	$httpHeaders = array('Content-Type' => 'multipart/form-data');
+	$postData = array('file' => $curlFile);
+	$pest->setupAuth($_SESSION['protOnOAuth']['access_token'], '', 'bearer');
+	try {
+		$docInfo = json_decode($pest->post('/documents/getInfo', $postData, $httpHeaders));
+	} catch (\Pest_Exception $e) {
+		//$error = json_decode($e->getMessage());
+		//echo 'Excepcion capturada: ',  $error->error, "\n";
+		drupal_set_message($e->getMessage(), 'warning');
+	}
+	
+	return $docInfo;
+	
+}
+
+function prot_on_curl_file($filePath){
+	
+	if(version_compare(PHP_VERSION, '5.5.0') >= 0){
+		$curlFile = new CURLFile($filePath, '', '');
+	} else {
+		$curlFile = "@".$filePath;
+	}
+	
+	return $curlFile;
+	
+}
+
+/**
+ * Sets the watermark for an image
+ * @param integer $docId
+ */
+function prot_on_set_watermark($docId, $watermark){
+	
+	// Call to getInfo service
+	$pest = Util::getPest(false);
+	
+	// Call to watermark service
+	$httpHeaders = array('Content-Type' => 'multipart/form-data');
+	$pest->setupAuth($_SESSION['protOnOAuth']['access_token'], '', 'bearer');
+	try {
+		$pest->put('/documents/'.$docId.'/watermark?watermark='.$watermark, NULL, $httpHeaders);
+	} catch (\Pest_Exception $e) {
+		//$error = json_decode($e->getMessage());
+		//echo 'Excepcion capturada: ',  $error->error, "\n";
+	}
+	
+}
+
+function prot_on_mark_image($imagePath, $mark){
+	
+	if(!empty($mark)){
+		$info = pathinfo($imagePath);
+		$ext = $info['extension'];
+		if(extension_loaded('imagick')){
+			$im = new Imagick($imagePath);
+			
+			$imWidth = $im->getImageWidth();
+			$imHeight = $im->getImageHeight();
+			$fontSize = $imWidth / (0.7 * strlen($mark));
+		
+			$watermark = new ImagickDraw();
+			
+			$pixel = new ImagickPixel();
+			$pixel->setColor('black');
+			
+			$watermark->setFillColor($pixel);
+			$watermark->setFontFamily('Times');
+			$watermark->setFontSize($fontSize);
+			$watermark->setFillOpacity(.5);
+			$watermark->setGravity(Imagick::GRAVITY_CENTER);
+	
+			try{
+				$top = ($imHeight - 10);
+				$left = 10;
+				$angle = -45;
+				$im->annotateImage($watermark, 0, 0, $angle, $mark);
+				$im->setImageFormat($ext);
+				$type=$im->getFormat();
+				header("Content-type: $type");
+			} catch (Exception $e){
+				echo $e->getMessage();
+			}
+			return $im->getimageblob();
+		} else {
+			drupal_set_message('Image magick library not found, so Prot-On images cannot be marked', 'warning');
+		}
+	}
+}
+
+/**
+ * Scan the text looking for anchors pointing to .proton files
+ * @param DOMDocument $dom
+ * @return DOMDocument $dom
+ */
+function prot_on_modify_tags($dom, $tag, $targetAttr){
+	
+	$elList = $dom->getElementsByTagName($tag);
+	
+	foreach($elList as $element) {
+		$protOnLink = false;
+		$attr = $element->getAttribute($targetAttr);
+		$item = parse_url($attr);
+		$path = !empty($item['path']) ? $item['path'] : '';
+		$protOnShortenerHost = parse_url(variable_get("prot_on_shortener_url", ""), PHP_URL_HOST);
+		
+		// Link pointing to a .proton file
+		if(strpos($path, '.proton')!==false
+				&& prot_on_dnd_is_supported($path)){
+			$encodedURL = urlencode($attr);
+			$preparedTarget = variable_get('prot_on_dnd_url', variable_get('prot_on_public_dnd', NULL)).'/load.do?url='.$encodedURL;
+			$protOnLink = true;
+		}
+		
+		// Link pointing to Prot-On Shortener
+		if(isset($item['host'])
+				&& strpos($item['host'], $protOnShortenerHost)!==false){
+			$preparedTarget = $attr;
+			$protOnLink = true;
+		}
+		
+		// Modifying tag
+		if($protOnLink){
+			switch($tag){
+				case "a":
+					$attrDataLink = $dom->createAttribute('data-link');
+					$element->appendChild($attrDataLink);
+					$element->setAttribute('data-link', 'dnd');
+					
+					$element->setAttribute('href', $preparedTarget);
+					$element->setAttribute('target', '_blank');
+				break;
+				case "img":
+					$linkWrapper = $dom->createElement('A');
+					$attrDataLink = $dom->createAttribute('data-link');
+					$linkWrapper->appendChild($attrDataLink);
+					$linkWrapper->setAttribute('data-link', 'dnd');
+						
+					$linkWrapper->setAttribute('href', $preparedTarget);
+					$linkWrapper->setAttribute('target', '_blank');
+					$parentNode = $element->parentNode;
+					$parentNode->replaceChild($linkWrapper, $element);
+					$linkWrapper->appendChild($element);
+				break;
+			}
+		}
+	}
+	
+	return $dom;
+	
+}
+
+/**
+ * Scan the document in order to find protected images
+ * @param string $strImage
+ * @return string $newPath
+ */
+function prot_on_modify_images(&$node, $images){
+	
+	$i = 0;
+	foreach($images as $image){
+		if(is_array($image)
+				&& isset($image['#item'])){
+			$newPath = prot_on_modify_image($image);
+			$node->content['field_image'][$i]['#item']['uri'] = $newPath;
+			$i++;
+		}
+	}
+
+}
+
+function prot_on_modify_image($image){
+	
+	$src = $image['#item']['uri'];
+	$newPath = $src;
+	
+	$path = !empty($src) ? file_create_url($src) : '';
+	if(strpos($path, '.proton')!==false
+			&& prot_on_dnd_is_supported($path)){
+		// Mark image
+		$newPath = prot_on_decrypt_image($src);
+	}
+	
+	return $newPath;
+	
+}
+
+/**
+ * Find Prot-On links in fields, in order to redirect .proton files to DND
+ * @param array $node
+ */
+function prot_on_parse_attachments(&$node){
+	
+	$fieldnames = array_keys(field_info_field_map());
+	$fieldexcludes = array("comment_Body", "body", "field_image", "field_tags");
+	foreach($fieldnames as $fieldkey => $fieldname){
+		//echo "<br /><br /><strong><u>".$fieldname."</u></strong><br /><br />";
+	
+		if(in_array($fieldname, $fieldexcludes)) {
+			continue;
+		}
+	
+		if(isset($node->content[$fieldname])){
+			$fields = $node->content[$fieldname];
+			foreach($fields as $field){
+				if(strpos($fieldname, 'field_')!==false
+						&& is_array($field)
+						&& isset($field['#file'])){
+						
+					$uri = $field['#file']->uri;
+					// Link pointing to a .proton file
+					if(strpos($uri, '.proton')!==false
+							&& prot_on_dnd_is_supported($uri)){
+						$encodedURL = urlencode(file_create_url($uri));
+						$preparedUri = variable_get('prot_on_dnd_url', variable_get('prot_on_public_dnd', NULL)).'/load.do?url='.$encodedURL;
+					}
+					$field['#file']->uri = isset($preparedUri) ? $preparedUri : $field['#file']->uri;
+				}
+			}
+		}
+	}
+	
+}
+
+/**
+* Checks if the file is supported by Prot-On Drag'n Drop
+*/
+function prot_on_dnd_is_supported($filename){
+	
+	$result = false;
+	$supported = array("docx", "xlsx", "pptx", "pdf", "jpg", "png", "gif", "bmp", "tif", "tiff", "xml", "txt");
+	$ext = pathinfo($filename, PATHINFO_EXTENSION);
+	
+	if(in_array($ext, $supported)){
+		$result = true;
+	}
+	
+	return $result;
+
+}
+
+/**
+ * Provides the possibility of Single Sign On
+ * @param unknown $edit
+ * @param unknown $account
+ */
+function prot_on_user_login(&$edit, $account) {
+	$uid = $account->uid;
+	$isOAuthTokens = OAuth\OAuth::isOAuthTokens($uid);
+	if($isOAuthTokens){
+		header('Location: /prot_on/oauth?uid='.$uid);
+	}
+}
+
+/**
+ * Destroy OAuth user data
+ */
+function prot_on_user_logout($account){
+	unset($_SESSION['protOnOAuth']);
+}
+
+/**
+ * Checks if current user has been logged with OAuth
+ * @return boolean
+ */
+function isOAuthLogged(){
+	
+	$result = false;
+	
+	if(!empty($_SESSION['protOnOAuth']['access_token'])){
+		$result = true;
+	}
+	
+	return $result;
+	
+}
+
+/**
+ * Modify Log-in form in order to add the OAuth Button
+ * @param $form
+ * @param $form_state
+ * @param $form_id
+ */
+function prot_on_form_alter(&$form, $form_state, $form_id){
+	switch($form_id){
+		case "user_login_block":
+			$activeSSO = variable_get('prot_on_active_sso', '');
+			if(!isOAuthLogged() && $activeSSO){
+				$linkSSO = "window.location.href='".base_path()."prot_on/sso'";
+				$form['actions']['oauth'] = array("#type"=>"button", '#id'=>'oAuthButton', "#value"=>"Log in with Prot-On", "#attributes"=>array("onclick"=>$linkSSO));
+			}
+		break;
+	}
+}
+
+function prot_on_getNID(){
+	
+	$nid = NULL;
+	
+	if (arg(0) == 'node' && is_numeric(arg(1))) {
+		$nid = arg(1);
+		if ($nid) {
+			$node = node_load($nid);
+			/** do something **/
+		}
+	}
+	
+	return $nid;
+}
+
+function prot_on_persist_tokens($uid){
+	
+	if(!empty($uid)){
+		
+		$result = db_query("SELECT aid FROM authmap WHERE uid = :uid AND module='prot_on'", array(":uid" => $uid));
+		$record = $result->fetchObject();
+		$aid = $record->aid;
+		
+		$result = db_query("SELECT * FROM authmap_prot_on WHERE uid = :uid", array(":uid" => $uid));
+		$record = $result->fetchObject();
+		if(!$record){
+			db_insert('authmap_prot_on')->fields(array(
+			'aid' => $aid,
+			'uid' => $uid,
+			'access_token' => $_SESSION['protOnOAuth']['access_token'],
+			'refresh_token' => $_SESSION['protOnOAuth']['refresh_token'],
+			))->execute();
+		} else {
+			db_update('authmap_prot_on')->fields(array(
+			'access_token' => $_SESSION['protOnOAuth']['access_token'],
+			'refresh_token' => $_SESSION['protOnOAuth']['refresh_token'],
+			))
+			->condition('uid', $uid, '=')
+			->execute();
+		}
+		
+	}
+}
