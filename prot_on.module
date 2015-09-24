@@ -324,7 +324,7 @@ function prot_on_node_view($node, $view_mode, $langcode) {
  * @param $view_mode
  * @param $langcode
  */
-function prot_on_parse_node($node, $view_mode, $langcode){
+function prot_on_parse_node($node, $view_mode, $langcode){//echo '<pre>';var_dump(field_info_field_map());echo '</pre>';
 	
 	$text_types = array('body', 'text', 'text_long', 'text_with_summary', 'summary', 'list_text', 'taxonomy_term_reference');
 	$image_types = array('image');
@@ -360,7 +360,7 @@ function prot_on_parse_node($node, $view_mode, $langcode){
 
 					$text = $dom->saveXML($dom);
 					
-					$textFields[$i]['#markup'] = $text;
+					$textFields[$i]['#markup'] = utf8_encode($text);
 					$node->content[$fieldName] = $textFields[$i];
 
 				}
@@ -373,9 +373,11 @@ function prot_on_parse_node($node, $view_mode, $langcode){
 			if(isset($images)){
 				prot_on_modify_images($node, $images);
 			}
+
+			//var_dump($node->content['field_image'][0]['#item']);
 		} elseif(in_array($fieldAttrs['type'], $file_types)) {
 			// Other fields (attachments)
-			prot_on_parse_attachments($node);
+			prot_on_parse_attachments($node, $fieldName);
 		}
 
 		/* DOM save */
@@ -741,7 +743,7 @@ function prot_on_modify_tags($dom, $tag, $targetAttr){
 		// Link pointing to a .proton file
 		if(strpos($path, '.proton')!==false
 				&& prot_on_dnd_is_supported($path)){
-			$encodedURL = urlencode($attr);
+			$encodedURL = rawurlencode($attr);
 			$preparedTarget = variable_get('prot_on_dnd_url', variable_get('prot_on_public_dnd', NULL)).'/load.do?url='.$encodedURL;
 			$protOnLink = true;
 		}
@@ -823,37 +825,35 @@ function prot_on_modify_image($image){
  * Find Prot-On links in fields, in order to redirect .proton files to DND
  * @param array $node
  */
-function prot_on_parse_attachments(&$node){
-	
-	$fieldnames = array_keys(field_info_field_map());
+function prot_on_parse_attachments($node, $fieldName){
+
+	$fields = isset($node->content[$fieldName]) ? $node->content[$fieldName] : NULL;
 	$fieldexcludes = array("comment_Body", "body", "field_image", "field_tags");
-	foreach($fieldnames as $fieldkey => $fieldname){
-		//echo "<br /><br /><strong><u>".$fieldname."</u></strong><br /><br />";
 	
-		if(in_array($fieldname, $fieldexcludes)) {
-			continue;
-		}
+	if(in_array($fieldName, $fieldexcludes)) {
+		continue;
+	}
 	
-		if(isset($node->content[$fieldname])){
-			$fields = $node->content[$fieldname];
-			foreach($fields as $field){
-				if(strpos($fieldname, 'field_')!==false
-						&& is_array($field)
-						&& isset($field['#file'])){
-						
-					$uri = $field['#file']->uri;
-					// Link pointing to a .proton file
-					if(strpos($uri, '.proton')!==false
-							&& prot_on_dnd_is_supported($uri)){
-						$encodedURL = urlencode(file_create_url($uri));
-						$preparedUri = variable_get('prot_on_dnd_url', variable_get('prot_on_public_dnd', NULL)).'/load.do?url='.$encodedURL;
-					}
-					$field['#file']->uri = isset($preparedUri) ? $preparedUri : $field['#file']->uri;
+	if(isset($fields)){
+		foreach($fields as $field){
+			if(strpos($fieldName, 'field_')!==false
+					&& is_array($field)
+					&& isset($field['#file'])){
+					
+				$uri = $field['#file']->uri;
+				// Link pointing to a .proton file
+				if(strpos($uri, '.proton')!==false
+						&& prot_on_dnd_is_supported($uri)){
+					$encodedURL = urlencode(file_create_url($uri));
+					$preparedUri = variable_get('prot_on_dnd_url', variable_get('prot_on_public_dnd', NULL)).'/load.do?url='.$encodedURL;
 				}
+				$field['#file']->uri = isset($preparedUri) ? $preparedUri : $field['#file']->uri;
 			}
 		}
 	}
 	
+	return $fields;
+
 }
 
 /**
